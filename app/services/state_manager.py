@@ -1,9 +1,11 @@
 from sqlalchemy.orm import Session
 import datetime
 import secrets
+import re
 from app.models import UserSession, TransactionRecord, PaymentProvider
 from app.services.green_api import GreenAPIClient
 from app.services.meter_api import MeterManagementAPI
+from app.services.payment_api import payment_service
 
 whatsapp_client = GreenAPIClient()
 meter_client = MeterManagementAPI()
@@ -32,7 +34,6 @@ class ChatbotStateHandler:
         clean_text = self.text.lower()
         
         # Step 1: Global navigation. Always allow the user to cancel and go back to the start.
-        # We include "0" here as the universal back button.
         if clean_text in ['0', 'cancel', 'menu', 'hi', 'hello']:
             self._reset_to_menu("Welcome back to Smart Access! ⚡\nHow can we help you today?")
             self._show_menu_options()
@@ -47,6 +48,8 @@ class ChatbotStateHandler:
             self._handle_awaiting_amount()
         elif state == "AWAITING_PAYMENT_METHOD":
             self._handle_payment_method()
+        elif state == "AWAITING_ECOCASH_NUMBER":
+            self._handle_awaiting_ecocash_number()
         else:
             self._reset_to_menu("I didn't understand that. Let's start over.")
             self._show_menu_options()
@@ -67,21 +70,26 @@ class ChatbotStateHandler:
             self.db.commit()
             whatsapp_client.send_message(self.sender, "Please enter your meter number to proceed:\n\nReply *0* to cancel.")
         else:
-            # If they enter anything other than 1, show the menu again.
             self._show_menu_options()
 
     def _handle_awaiting_meter(self):
         meter_no = self.text
         whatsapp_client.send_message(self.sender, "Checking meter details, please wait...")
         
-        # Verify with external API
-        meter_info = meter_client.get_meter_info(meter_no)
+        # --- TEMPORARY MOCK FOR TESTING ---
+        if meter_no == "11112222333":
+            meter_info = {
+                "code": "0", 
+                "data": {"userName": "Anotida Test Account"}
+            }
+        else:
+            meter_info = meter_client.get_meter_info(meter_no)
+        # ----------------------------------
         
-        if meter_info.get("code") == "0": # Assuming 0 is success per API spec
+        if meter_info.get("code") == "0":
             data = meter_info.get("data", {})
             name = data.get("userName", "Unknown")
             
-            # Save meter to context and move to next step
             context = dict(self.session.context_data)
             context['meter_no'] = meter_no
             self.session.context_data = context
@@ -98,12 +106,30 @@ class ChatbotStateHandler:
             whatsapp_client.send_message(self.sender, "❌ Invalid meter number. Please try again or reply *0* to cancel.")
 
     def _handle_awaiting_amount(self):
+        # 1. Normalize commas to periods (in case they type 15,50)
+        normalized_text = self.text.replace(',', '.')
+        
+        # 2. Extract the first valid number pattern from the text
+        match = re.search(r'\d+(?:\.\d+)?', normalized_text)
+        
+        if not match:
+            whatsapp_client.send_message(
+                self.sender, 
+                "⚠️ We couldn't detect a valid number. Please reply with the amount (e.g., 15.00) or *0* to cancel:"
+            )
+            return
+
+        clean_amount_str = match.group()
+
         try:
-            amount = float(self.text)
-            if amount <= 0 or amount > 21474836.47:
+            amount = float(clean_amount_str)
+            if amount <= 0 or amount > 10000:
                 raise ValueError
         except ValueError:
-            whatsapp_client.send_message(self.sender, "⚠️ Invalid amount. Please enter a valid number (e.g., 15.00) or reply *0* to cancel:")
+            whatsapp_client.send_message(
+                self.sender, 
+                "⚠️ Please enter a valid positive amount between $1 and $10,000 (e.g., 15.00) or reply *0* to cancel:"
+            )
             return
 
         # Save amount to context
@@ -131,9 +157,35 @@ class ChatbotStateHandler:
             return
 
         provider = provider_map[self.text]
+        
+        # Save the chosen provider
+        context = dict(self.session.context_data)
+        context['provider'] = provider.value
+        self.session.context_data = context
+        
+        if provider == PaymentProvider.ECOCASH:
+            self.session.current_state = "AWAITING_ECOCASH_NUMBER"
+            self.db.commit()
+            whatsapp_client.send_message(
+                self.sender, 
+                "📱 Please enter the EcoCash number you want to pay with (e.g., 0771234567):\n\nReply *0* to cancel."
+            )
+        else:
+            msg = f"⏳ {provider.value} integration is coming soon! Please use EcoCash for now."
+            self._reset_to_menu(msg)
+
+    def _handle_awaiting_ecocash_number(self):
+        ecocash_number = self.text.strip()
+        
+        # Basic validation (must start with 077 or 078 and be 10 digits)
+        if not ecocash_number.startswith(("077", "078")) or len(ecocash_number) != 10:
+            whatsapp_client.send_message(self.sender, "⚠️ Invalid EcoCash number. Please enter a valid 10-digit number starting with 077 or 078:")
+            return
+
         context = self.session.context_data
         meter_no = context.get('meter_no')
         amount = context.get('amount')
+        provider = PaymentProvider.ECOCASH
         ref_num = generate_ref()
 
         # Log pending transaction in database
@@ -147,13 +199,22 @@ class ChatbotStateHandler:
         self.db.add(transaction)
         self.db.commit()
 
-        # Alert the user
-        msg = (
-            f"⏳ Processing {provider.value} payment...\n"
-            f"Amount: USD {amount:.2f}\n"
-            f"Ref: {ref_num}\n\n"
-            "Please check your phone for the PIN prompt. We will notify you once payment is received."
-        )
+        whatsapp_client.send_message(self.sender, "⏳ Connecting to EcoCash, please wait...")
+        
+        # Fire the Paynow request using the number the user just provided
+        # NOTE: While testing in Paynow Sandbox, you must enter 0771111111 when prompted in WhatsApp!
+        payment_response = payment_service.trigger_ecocash_payment(ecocash_number, amount, ref_num)
+        
+        if payment_response["status"] == "success":
+            msg = (
+                f"✅ Payment Initiated!\n\n"
+                f"Ref: {ref_num}\n"
+                f"Amount: USD {amount:.2f}\n\n"
+                f"📱 *Check the phone ({ecocash_number}) right now!* A prompt has been sent. Enter your PIN to complete the transaction."
+            )
+        else:
+            msg = f"❌ Sorry, the EcoCash network failed to respond: {payment_response.get('error_msg')}"
+            
         self._reset_to_menu(msg)
 
     def _reset_to_menu(self, message: str):
