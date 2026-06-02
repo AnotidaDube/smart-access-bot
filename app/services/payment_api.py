@@ -13,11 +13,12 @@ class PaymentGateway:
         
         # We set return and result URLs. In production, your FastAPI server will 
         # receive background updates here when a user types in their PIN.
+        # Replace the example.com URLs with your active Ngrok URL + /webhook/paynow
         self.paynow = Paynow(
             integration_id,
             integration_key,
-            "http://example.com/return", # Placeholder for now
-            "http://example.com/result"  # Placeholder for now
+            "https://disposal-bodacious-slug.ngrok-free.de/webhook/paynow", # Return URL
+            "https://disposal-bodacious-slug.ngrok-free.dev/webhook/paynow"  # Result URL
         )
 
     def trigger_ecocash_payment(self, phone_number: str, amount: float, reference: str):
