@@ -1,6 +1,6 @@
 import enum
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Numeric, DateTime, Enum, JSON
+from sqlalchemy import Column, Integer, String, Numeric, DateTime, Enum, JSON, Boolean
 from app.database import Base, engine
 
 # Define payment methods and status options
@@ -37,6 +37,8 @@ class TransactionRecord(Base):
     status = Column(Enum(TransactionStatus), default=TransactionStatus.PENDING)
     provider_ref = Column(String, nullable=True) # ID returned by EcoCash/Paynow
     created_at = Column(DateTime, default=datetime.utcnow)
+    token = Column(String(50), nullable=True)
+    is_token_used = Column(Boolean, default=False)
 
 # Automatically create the tables in PostgreSQL
 if __name__ == "__main__":

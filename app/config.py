@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     # App Settings
     APP_NAME: str = "Smart Access WhatsApp Payment System"
     DEBUG: bool = False
+    SERVER_BASE_URL: str  # Used for Paynow Webhook return URLs
     
     # Database Settings
     DATABASE_URL: str
@@ -17,6 +18,11 @@ class Settings(BaseSettings):
     METER_API_BASE_URL: str
     METER_API_APP_ID: str
     METER_API_APP_SECRET: str
+    GAS_PRICE_PER_KG: float = 1.80  # Dynamic gas pricing fallback
+    
+    # Paynow Payment Gateway Settings
+    PAYNOW_INTEGRATION_ID: str
+    PAYNOW_INTEGRATION_KEY: str
     
     # Configuration to read the .env file
     model_config = SettingsConfigDict(

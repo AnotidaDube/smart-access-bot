@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 import logging
 
 from app.database import SessionLocal, get_db, engine, Base
-from app.models import TransactionRecord, TransactionStatus # Added TransactionStatus here
+from app.models import TransactionRecord, TransactionStatus
 from app.services.state_manager import ChatbotStateHandler
 from app.services.green_api import GreenAPIClient
 from app.services.meter_api import MeterManagementAPI
@@ -36,24 +36,24 @@ async def green_api_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         payload = await request.json()
     except Exception as e:
-        print(f"Error parsing JSON: {e}")
+        logger.error(f"Error parsing JSON: {e}")
         return {"status": "error", "message": "Invalid JSON"}
 
-    # 2. Print raw webhook structure to the terminal console
-    print("\n====== RAW WEBHOOK DATA ======")
-    print(payload)
-    print("==============================\n")
-
-    # 3. Process the state manager logic securely
+    # 2. Process the state manager logic securely
     try:
         # Accept both incoming texts and messages you send to yourself
         if payload.get("typeWebhook") in ["incomingMessageReceived", "outgoingMessageReceived"]:
             message_data = payload.get("messageData", {})
             type_message = message_data.get("typeMessage")
             
+            sender_data = payload.get("senderData", {})
+            sender = sender_data.get("sender")
+            
+            # Extract the user's name and grab the first word to be friendly
+            raw_name = sender_data.get("senderName") or sender_data.get("senderContactName") or "there"
+            first_name = raw_name.split()[0]
+            
             text = None
-            sender = payload.get("senderData", {}).get("sender")
-
             # Check if it's a normal text or an extended text
             if type_message == "textMessage":
                 text = message_data.get("textMessageData", {}).get("textMessage")
@@ -61,10 +61,10 @@ async def green_api_webhook(request: Request, db: Session = Depends(get_db)):
                 text = message_data.get("extendedTextMessageData", {}).get("text")
                 
             if sender and text:
-                logger.info(f"Received message from {sender}: {text}")
+                logger.info(f"Received message from {sender} ({first_name}): {text}")
                 
-                # Hand data over to your active state machine
-                handler = ChatbotStateHandler(db, sender, text)
+                # Hand data over to your active state machine for normal user flow
+                handler = ChatbotStateHandler(db, sender, text, first_name)
                 handler.process()
                     
         return {"status": "success"}
@@ -97,31 +97,36 @@ async def paynow_webhook(request: Request):
         transaction.status = TransactionStatus.SUCCESSFUL
         db.commit()
 
-        # 2. Trigger the Access Corporation API to generate Token & push to edge device
+        # 2. Trigger the Zhongyi API to push top-up directly to the edge device
         recharge_data = meter_client.process_recharge(
             meter_no=transaction.meter_number, 
             amount_usd=transaction.amount_usd,
             pay_id=paynow_reference  
         )
 
-        # 3. Send the Token back to the user via WhatsApp
+        # 3. Send the confirmation back to the user via WhatsApp
         if recharge_data["status"] == "success":
+            # We still save the token for our own database records
             token = recharge_data["display_token"]
             volume = recharge_data["volume_kg"]
+            
+            transaction.token = token
+            db.commit()
             
             msg = (
                 f"🎉 *Payment Successful!*\n\n"
                 f"Gas Volume: {volume} kg\n"
                 f"Amount Paid: USD {transaction.amount_usd:.2f}\n"
                 f"Meter: {transaction.meter_number}\n\n"
-                f"🔑 *Your Secure Recharge Token:*\n"
-                f"*{token}*\n\n"
-                f"Please enter this 20-digit token into your meter keypad. The system will verify it and automatically refill your gas via the reticulation pipes."
+                f"⚡ Your account has been credited. \n\n"
+                f"⏳ *Note:* Your meter will update automatically within 24 hours to save battery.\n\n"
+                f"🔥 *Need gas instantly?*\n"
+                f"Press and hold the button on your physical meter for 3 seconds to wake it up and download your credit right now."
             )
             whatsapp_client.send_message(transaction.whatsapp_num, msg)
         else:
             # Fallback if the token generation fails but they already paid
-            error_msg = f"⚠️ Your payment of USD {transaction.amount_usd:.2f} was successful, but we had trouble generating your token. Please contact support with Ref: {reference}."
+            error_msg = f"⚠️ Your payment of USD {transaction.amount_usd:.2f} was successful, but we had trouble reaching the meter network. Please contact support with Ref: {reference}."
             whatsapp_client.send_message(transaction.whatsapp_num, error_msg)
             
     # Use the exact Enum from models.py

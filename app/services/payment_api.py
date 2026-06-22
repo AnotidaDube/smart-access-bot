@@ -1,29 +1,29 @@
-import os
+import logging
 from paynow import Paynow
-from dotenv import load_dotenv
+from app.config import settings
 
-# Load environment variables
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 class PaymentGateway:
     def __init__(self):
-        # Initialize Paynow with your keys from .env
-        integration_id = os.getenv("PAYNOW_INTEGRATION_ID")
-        integration_key = os.getenv("PAYNOW_INTEGRATION_KEY")
+        # Initialize Paynow using your centralized config settings
+        integration_id = settings.PAYNOW_INTEGRATION_ID
+        integration_key = settings.PAYNOW_INTEGRATION_KEY
         
-        # We set return and result URLs. In production, your FastAPI server will 
-        # receive background updates here when a user types in their PIN.
-        # Replace the example.com URLs with your active Ngrok URL + /webhook/paynow
+        # Dynamically build the webhook URL from your settings.
+        # This prevents hardcoding fragile Ngrok links.
+        base_url = getattr(settings, 'SERVER_BASE_URL', 'http://127.0.0.1:8001').rstrip('/')
+        webhook_url = f"{base_url}/webhook/paynow"
+        
         self.paynow = Paynow(
             integration_id,
             integration_key,
-            "https://disposal-bodacious-slug.ngrok-free.de/webhook/paynow", # Return URL
-            "https://disposal-bodacious-slug.ngrok-free.dev/webhook/paynow"  # Result URL
+            webhook_url, # Return URL
+            webhook_url  # Result URL
         )
 
     def trigger_ecocash_payment(self, phone_number: str, amount: float, reference: str):
         """Sends an STK push (PIN prompt) to the user's phone."""
-        
         try:
             payment = self.paynow.create_payment(reference, "dubeanotida5@gmail.com")
             payment.add("Smart Access Gas Recharge", amount)
@@ -38,13 +38,11 @@ class PaymentGateway:
                     "instructions": response.instructions
                 }
             else:
-                # Log the raw dictionary from Paynow to your VS Code terminal
-                print(f"========== PAYNOW ERROR ==========")
-                print(f"RAW DATA: {response.data}")
-                print(f"==================================")
+                # Log the raw dictionary from Paynow for debugging
+                logger.error(f"PAYNOW ERROR | RAW DATA: {response.data}")
                 
                 # Extract the specific error message provided by Paynow
-                actual_error = response.data.get('error', 'Check VS Code terminal for details')
+                actual_error = response.data.get('error', 'Check server logs for details')
                 
                 return {
                     "status": "error",
@@ -52,8 +50,7 @@ class PaymentGateway:
                 }
                 
         except Exception as e:
-            # Catch Python crashes (e.g., missing keys, network timeouts)
-            print(f"SYSTEM ERROR: {str(e)}")
+            logger.error(f"Payment System Error: {str(e)}")
             return {
                 "status": "error",
                 "error_msg": f"Internal System Error: {str(e)}"
